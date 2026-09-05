@@ -1,0 +1,590 @@
+# =============================================================================
+# Workflow: Safe Zero-Downtime Deploy (HestiaCP & Standard Linux Compatible)
+# =============================================================================
+#
+# REQUIRED GITHUB SECRETS (Repository / Environment Secrets):
+# -----------------------------------------------------------------------------
+#   SSH_PRIVATE_KEY             : Private SSH key for server authentication (Required)
+#   APP_KEY                     : Laravel application encryption key (base64 string) (Required)
+#   DB_PASSWORD                 : Database user password (Required)
+#   MAIL_PASSWORD               : SMTP mail server password (Optional, default: null)
+#   GOOGLE_CLIENT_SECRET        : Google OAuth client secret (Optional)
+#   FIREBASE_API_KEY            : Firebase Web API key (Optional)
+#   FIREBASE_VAPID_KEY          : Firebase Cloud Messaging Web Push VAPID key (Optional)
+#   FIREBASE_CREDENTIALS_JSON   : Full JSON content of Firebase service account key (Optional)
+#
+# GITHUB VARIABLES (Repository / Environment Variables):
+# -----------------------------------------------------------------------------
+# [Workflow & CI/CD Controls]
+#   RUN_BACKEND_TESTS           : Run PHP & Pest test suite on runner (Default: false)
+#   RUN_FRONTEND_TESTS          : Run Vitest frontend test suite on runner (Default: false)
+#   PHP_VERSION                 : PHP version on GitHub Actions runner (Default: '8.4')
+#   BUILD_NPM                   : Run npm ci & npm run build on runner (Default: false)
+#   RUN_MIGRATIONS              : Run `artisan migrate --force` on remote server (Default: false)
+#   PHP_EXECUTABLE              : PHP binary path on remote server (Default: 'php')
+#
+# [SSH & Server Deployment Paths]
+#   SSH_HOST                    : Remote server hostname or IP address (Required)
+#   SSH_USERNAME                : SSH user account (Required)
+#   SSH_PORT                    : SSH port (Default: 22)
+#   SSH_REMOTE_DIR              : Base deploy directory hosting releases/ (Required, e.g. /home/user/web/domain.com/public_html)
+#   SSH_APP_DIR                 : Active Laravel root directory (Required, e.g. /home/user/web/domain.com/public_html/current)
+#   SSH_UPLOAD_DIR              : Shared storage directory on server (Default: 'uploads', resolves to $SSH_REMOTE_DIR/uploads)
+#   LARAVEL_UPLOAD_DIR          : Relative path in app linked to SSH_UPLOAD_DIR (Default: 'public/uploads')
+#
+# [Laravel Application (.env.server)]
+#   APP_NAME                    : Application name (Default: 'Laravel')
+#   APP_ENV                     : Environment name (Default: 'production')
+#   APP_DEBUG                   : Enable debug mode (Default: false)
+#   APP_URL                     : Public URL of the application (Default: 'http://localhost')
+#   APP_MODE                    : System operational mode (Default: 'WHITE_LABEL')
+#   APP_EMAIL_VERIFICATION      : Require email verification (Default: 'true')
+#   APP_LOCALE                  : Application primary locale (Default: 'en')
+#   APP_FALLBACK_LOCALE         : Application fallback locale (Default: 'en')
+#   APP_FAKER_LOCALE            : Faker localization (Default: 'en_US')
+#   APP_MAINTENANCE_DRIVER      : Maintenance mode driver (Default: 'file')
+#   BCRYPT_ROUNDS               : Bcrypt hashing work factor (Default: 12)
+#
+# [Logging]
+#   LOG_CHANNEL                 : Primary log channel (Default: 'stack')
+#   LOG_STACK                   : Stack log channels (Default: 'single')
+#   LOG_DEPRECATIONS_CHANNEL    : Deprecation log channel (Default: 'null')
+#   LOG_LEVEL                   : Minimum log level (Default: 'error')
+#
+# [Database]
+#   DB_CONNECTION               : Database connection driver (Default: 'mysql')
+#   DB_HOST                     : Database server hostname (Default: '127.0.0.1')
+#   DB_PORT                     : Database server port (Default: 3306)
+#   DB_DATABASE                 : Database name (Required)
+#   DB_USERNAME                 : Database user (Required)
+#
+# [Session, Cache, Queue & Filesystem]
+#   SESSION_DRIVER              : Session store driver (Default: 'database')
+#   SESSION_LIFETIME            : Session duration in minutes (Default: 120)
+#   SESSION_ENCRYPT             : Encrypt session payload (Default: false)
+#   SESSION_PATH                : Cookie path (Default: '/')
+#   SESSION_DOMAIN              : Cookie domain (Default: 'null')
+#   BROADCAST_CONNECTION        : Event broadcasting driver (Default: 'log')
+#   FILESYSTEM_DISK             : Default filesystem disk (Default: 'local')
+#   QUEUE_CONNECTION            : Queue processing driver (Default: 'database')
+#   CACHE_STORE                 : Application cache store (Default: 'database')
+#   MEMCACHED_HOST              : Memcached server hostname (Default: '127.0.0.1')
+#
+# [Mail / SMTP]
+#   MAIL_MAILER                 : Mail transport driver (Default: 'log')
+#   MAIL_SCHEME                 : Mail encryption scheme (Default: 'null')
+#   MAIL_HOST                   : SMTP host address (Default: '127.0.0.1')
+#   MAIL_PORT                   : SMTP server port (Default: 2525)
+#   MAIL_USERNAME               : SMTP username (Default: 'null')
+#   MAIL_FROM_ADDRESS           : Sender email address (Default: 'hello@example.com')
+#   MAIL_FROM_NAME              : Sender display name (Default: ${APP_NAME})
+#
+# [Vite, OAuth & Firebase Services]
+#   VITE_APP_NAME               : Frontend application title (Default: ${APP_NAME})
+#   GOOGLE_CLIENT_ID            : Google OAuth Client ID (Optional)
+#   GOOGLE_REDIRECT_URI         : Google OAuth callback URL (Default: ${APP_URL}/auth/google/callback)
+#   FIREBASE_AUTH_DOMAIN        : Firebase authentication domain (Optional)
+#   FIREBASE_PROJECT_ID         : Firebase project ID (Optional)
+#   FIREBASE_STORAGE_BUCKET     : Firebase storage bucket name (Optional)
+#   FIREBASE_MESSAGING_SENDER_ID: Firebase Cloud Messaging sender ID (Optional)
+#   FIREBASE_APP_ID             : Firebase Web App ID (Optional)
+#   FIREBASE_MEASUREMENT_ID     : Firebase Analytics measurement ID (Optional)
+# =============================================================================
+
+name: Laravel + Inertia Deploy
+
+on:
+  push:
+    branches:
+      - development
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'Production Apnea Dewata'
+        type: choice
+        options:
+          - Dev Apnea Dewata
+          - Production Apnea Dewata
+
+concurrency:
+  group: deploy-${{ github.ref_name }}-${{ inputs.environment || 'Production Apnea Dewata' }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Backend & Frontend Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # Backend Tests
+      # -----------------------------------------------------------------------
+      - name: Set up PHP
+        if: ${{ vars.RUN_BACKEND_TESTS == 'true' }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ vars.PHP_VERSION || '8.4' }}
+          tools: composer:v2
+          coverage: none
+
+      - name: Install Composer dependencies
+        if: ${{ vars.RUN_BACKEND_TESTS == 'true' }}
+        run: composer install --no-interaction
+
+      - name: Prepare .env for testing
+        if: ${{ vars.RUN_BACKEND_TESTS == 'true' }}
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+
+      - name: Run backend tests
+        if: ${{ vars.RUN_BACKEND_TESTS == 'true' }}
+        run: php artisan test
+
+      # -----------------------------------------------------------------------
+      # Frontend Tests (excluding e2e)
+      # -----------------------------------------------------------------------
+      - name: Set up Node.js
+        if: ${{ vars.RUN_FRONTEND_TESTS == 'true' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install NPM dependencies
+        if: ${{ vars.RUN_FRONTEND_TESTS == 'true' }}
+        run: npm ci
+
+      - name: Run frontend tests
+        if: ${{ vars.RUN_FRONTEND_TESTS == 'true' }}
+        run: npx vitest run
+
+  deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/development'
+
+    # Resolve the environment name dynamically:
+    # - manual dispatch: use the selected input
+    # - push to development: Dev Apnea Dewata
+    # - push to main: Production Apnea Dewata
+    environment: ${{ inputs.environment || (github.ref_name == 'development' && 'Dev Apnea Dewata') || 'Production Apnea Dewata' }}
+
+    env:
+      DEPLOY_TIMESTAMP: ""
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # -----------------------------------------------------------------------
+      # PHP / Composer Build (must run before NPM so vendor/ exists for Wayfinder)
+      # -----------------------------------------------------------------------
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ vars.PHP_VERSION || '8.4' }}
+          tools: composer:v2
+          coverage: none
+
+      - name: Install Composer dependencies
+        run: |
+          composer install --no-dev --optimize-autoloader --no-interaction
+
+      # -----------------------------------------------------------------------
+      # Node / Frontend Build (conditional based on BUILD_NPM environment variable)
+      # -----------------------------------------------------------------------
+      - name: Set up Node.js
+        if: ${{ vars.BUILD_NPM == 'true' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install NPM dependencies and build
+        if: ${{ vars.BUILD_NPM == 'true' }}
+        env:
+          FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+          FIREBASE_VAPID_KEY: ${{ secrets.FIREBASE_VAPID_KEY }}
+          FIREBASE_AUTH_DOMAIN: ${{ vars.FIREBASE_AUTH_DOMAIN }}
+          FIREBASE_PROJECT_ID: ${{ vars.FIREBASE_PROJECT_ID }}
+          FIREBASE_STORAGE_BUCKET: ${{ vars.FIREBASE_STORAGE_BUCKET }}
+          FIREBASE_MESSAGING_SENDER_ID: ${{ vars.FIREBASE_MESSAGING_SENDER_ID }}
+          FIREBASE_APP_ID: ${{ vars.FIREBASE_APP_ID }}
+          FIREBASE_MEASUREMENT_ID: ${{ vars.FIREBASE_MEASUREMENT_ID }}
+        run: |
+          if [ -f "package.json" ]; then
+            npm ci
+            npm run build
+          else
+            echo "package.json not found, skipping NPM build"
+          fi
+
+      # -----------------------------------------------------------------------
+      # Setup Server Environment Template (.env.server)
+      # -----------------------------------------------------------------------
+      - name: Create server .env template
+        run: |
+          cat > .env.server << 'EOF'
+          APP_NAME="${{ vars.APP_NAME || 'Laravel' }}"
+          APP_ENV="${{ vars.APP_ENV || 'production' }}"
+          APP_KEY="${{ secrets.APP_KEY }}"
+          APP_DEBUG=${{ vars.APP_DEBUG || 'false' }}
+          APP_URL="${{ vars.APP_URL || 'http://localhost' }}"
+          APP_MODE=${{ vars.APP_MODE || 'WHITE_LABEL' }}
+          APP_EMAIL_VERIFICATION=${{ vars.APP_EMAIL_VERIFICATION || 'true' }}
+
+          APP_LOCALE="${{ vars.APP_LOCALE || 'en' }}"
+          APP_FALLBACK_LOCALE="${{ vars.APP_FALLBACK_LOCALE || 'en' }}"
+          APP_FAKER_LOCALE="${{ vars.APP_FAKER_LOCALE || 'en_US' }}"
+
+          APP_MAINTENANCE_DRIVER="${{ vars.APP_MAINTENANCE_DRIVER || 'file' }}"
+
+          BCRYPT_ROUNDS=${{ vars.BCRYPT_ROUNDS || '12' }}
+
+          LOG_CHANNEL="${{ vars.LOG_CHANNEL || 'stack' }}"
+          LOG_STACK="${{ vars.LOG_STACK || 'single' }}"
+          LOG_DEPRECATIONS_CHANNEL="${{ vars.LOG_DEPRECATIONS_CHANNEL || 'null' }}"
+          LOG_LEVEL="${{ vars.LOG_LEVEL || 'error' }}"
+
+          DB_CONNECTION="${{ vars.DB_CONNECTION || 'mysql' }}"
+          DB_HOST="${{ vars.DB_HOST || '127.0.0.1' }}"
+          DB_PORT="${{ vars.DB_PORT || '3306' }}"
+          DB_DATABASE="${{ vars.DB_DATABASE }}"
+          DB_USERNAME="${{ vars.DB_USERNAME }}"
+          DB_PASSWORD="${{ secrets.DB_PASSWORD }}"
+
+          SESSION_DRIVER="${{ vars.SESSION_DRIVER || 'database' }}"
+          SESSION_LIFETIME=${{ vars.SESSION_LIFETIME || '120' }}
+          SESSION_ENCRYPT=${{ vars.SESSION_ENCRYPT || 'false' }}
+          SESSION_PATH="${{ vars.SESSION_PATH || '/' }}"
+          SESSION_DOMAIN="${{ vars.SESSION_DOMAIN || 'null' }}"
+
+          BROADCAST_CONNECTION="${{ vars.BROADCAST_CONNECTION || 'log' }}"
+          FILESYSTEM_DISK="${{ vars.FILESYSTEM_DISK || 'local' }}"
+          QUEUE_CONNECTION="${{ vars.QUEUE_CONNECTION || 'database' }}"
+
+          CACHE_STORE="${{ vars.CACHE_STORE || 'database' }}"
+
+          MEMCACHED_HOST="${{ vars.MEMCACHED_HOST || '127.0.0.1' }}"
+
+          MAIL_MAILER="${{ vars.MAIL_MAILER || 'log' }}"
+          MAIL_SCHEME="${{ vars.MAIL_SCHEME || 'null' }}"
+          MAIL_HOST="${{ vars.MAIL_HOST || '127.0.0.1' }}"
+          MAIL_PORT=${{ vars.MAIL_PORT || '2525' }}
+          MAIL_USERNAME="${{ vars.MAIL_USERNAME || 'null' }}"
+          MAIL_PASSWORD="${{ secrets.MAIL_PASSWORD || 'null' }}"
+          MAIL_FROM_ADDRESS="${{ vars.MAIL_FROM_ADDRESS || 'hello@example.com' }}"
+          MAIL_FROM_NAME="${{ vars.MAIL_FROM_NAME || '${APP_NAME}' }}"
+
+          VITE_APP_NAME="${{ vars.VITE_APP_NAME || '${APP_NAME}' }}"
+
+          GOOGLE_CLIENT_ID="${{ vars.GOOGLE_CLIENT_ID }}"
+          GOOGLE_CLIENT_SECRET="${{ secrets.GOOGLE_CLIENT_SECRET }}"
+          GOOGLE_REDIRECT_URI="${{ vars.GOOGLE_REDIRECT_URI || '${APP_URL}/auth/google/callback' }}"
+
+          FIREBASE_API_KEY="${{ secrets.FIREBASE_API_KEY }}"
+          FIREBASE_VAPID_KEY="${{ secrets.FIREBASE_VAPID_KEY }}"
+          FIREBASE_AUTH_DOMAIN="${{ vars.FIREBASE_AUTH_DOMAIN }}"
+          FIREBASE_PROJECT_ID="${{ vars.FIREBASE_PROJECT_ID }}"
+          FIREBASE_STORAGE_BUCKET="${{ vars.FIREBASE_STORAGE_BUCKET }}"
+          FIREBASE_MESSAGING_SENDER_ID="${{ vars.FIREBASE_MESSAGING_SENDER_ID }}"
+          FIREBASE_APP_ID="${{ vars.FIREBASE_APP_ID }}"
+          FIREBASE_MEASUREMENT_ID="${{ vars.FIREBASE_MEASUREMENT_ID }}"
+          FIREBASE_CREDENTIALS="storage/firebase-credentials.json"
+          EOF
+
+      # -----------------------------------------------------------------------
+      # Clear local Laravel caches before packaging
+      # -----------------------------------------------------------------------
+      - name: Clear local Laravel cache files
+        run: |
+          php artisan config:clear || true
+          php artisan route:clear || true
+          php artisan view:clear || true
+
+      # -----------------------------------------------------------------------
+      # Create Firebase Credentials File
+      # -----------------------------------------------------------------------
+      - name: Create Firebase credentials file
+        run: |
+          mkdir -p storage
+          echo '${{ secrets.FIREBASE_CREDENTIALS_JSON }}' > storage/firebase-credentials.json
+
+      # -----------------------------------------------------------------------
+      # Package Release
+      # -----------------------------------------------------------------------
+      - name: Create deployment archive
+        run: |
+          mkdir -p deployment_temp
+          
+          # Sync files into temp folder using same excludes as safe_deploy.sh
+          rsync -av --exclude-from=<(cat <<EOF
+          .git/
+          node_modules/
+          tests/
+          .github/
+          *.log
+          .env.example
+          .env
+          .env.deploy
+          .deploy.env
+          .deploy.env.example
+          README.md
+          ${{ vars.LARAVEL_UPLOAD_DIR || 'public/uploads' }}/
+          phpunit.xml
+          webpack.mix.js
+          tailwind.config.js
+          docker-compose.yml
+          server.php
+          deploy.sh
+          storage/logs/
+          storage/clockwork/
+          storage/framework/
+          deployment_temp/
+          EOF
+          ) ./ deployment_temp/
+          
+          # Create archive
+          tar -czf deployment.tar.gz -C deployment_temp .
+          rm -rf deployment_temp
+
+      # -----------------------------------------------------------------------
+      # Setup SSH
+      # -----------------------------------------------------------------------
+      - name: Set up SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -p ${{ vars.SSH_PORT || 22 }} -H ${{ vars.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      # -----------------------------------------------------------------------
+      # Set Deployment Timestamp
+      # -----------------------------------------------------------------------
+      - name: Set deployment timestamp
+        run: |
+          echo "DEPLOY_TIMESTAMP=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
+
+      # -----------------------------------------------------------------------
+      # Upload Package
+      # -----------------------------------------------------------------------
+      - name: Upload package to remote server
+        run: |
+          scp -P ${{ vars.SSH_PORT || 22 }} -o StrictHostKeyChecking=no deployment.tar.gz ${{ vars.SSH_USERNAME }}@${{ vars.SSH_HOST }}:${{ vars.SSH_REMOTE_DIR }}/
+
+      # -----------------------------------------------------------------------
+      # Setup Release and Extract
+      # -----------------------------------------------------------------------
+      - name: Setup remote release directory and extract files
+        run: |
+          ssh -p ${{ vars.SSH_PORT || 22 }} -o StrictHostKeyChecking=no ${{ vars.SSH_USERNAME }}@${{ vars.SSH_HOST }} "
+            cd ${{ vars.SSH_REMOTE_DIR }}
+            mkdir -p releases
+            mkdir -p releases/${{ env.DEPLOY_TIMESTAMP }}
+
+            # Move and unpack deployment archive
+            if [ -f deployment.tar.gz ]; then
+                mv deployment.tar.gz releases/${{ env.DEPLOY_TIMESTAMP }}/
+            fi
+
+            cd releases/${{ env.DEPLOY_TIMESTAMP }}
+            tar -xzf deployment.tar.gz --warning=no-unknown-keyword 2>/dev/null || tar -xzf deployment.tar.gz
+
+            # Setup .env file from template
+            cp .env.server .env 2>/dev/null || true
+
+            # Create persistent directories if missing
+            mkdir -p storage/app
+            mkdir -p storage/framework/cache
+            mkdir -p storage/framework/sessions
+            mkdir -p storage/framework/views
+            mkdir -p storage/logs
+            mkdir -p bootstrap/cache
+
+            # Set write permissions
+            chown -R www-data:www-data . 2>/dev/null || true
+            chmod -R 755 storage
+            chmod -R 755 bootstrap/cache
+
+            # Generate app key if needed
+            if ! grep -q 'APP_KEY=base64:' .env 2>/dev/null; then
+                ${{ vars.PHP_EXECUTABLE || 'php' }} artisan key:generate
+            fi
+
+            # Clear Laravel caches so no compiled release paths are packaged
+            ${{ vars.PHP_EXECUTABLE || 'php' }} artisan config:clear || true
+            ${{ vars.PHP_EXECUTABLE || 'php' }} artisan route:clear || true
+            ${{ vars.PHP_EXECUTABLE || 'php' }} artisan view:clear || true
+
+            # Remove deployment archive
+            rm -f deployment.tar.gz
+          "
+
+      # -----------------------------------------------------------------------
+      # Database Migrations
+      # -----------------------------------------------------------------------
+      - name: Run migrations on remote server
+        if: ${{ vars.RUN_MIGRATIONS == 'true' }}
+        run: |
+          ssh -p ${{ vars.SSH_PORT || 22 }} -o StrictHostKeyChecking=no ${{ vars.SSH_USERNAME }}@${{ vars.SSH_HOST }} "
+            cd ${{ vars.SSH_REMOTE_DIR }}/releases/${{ env.DEPLOY_TIMESTAMP }}
+            ${{ vars.PHP_EXECUTABLE || 'php' }} artisan migrate --force
+          "
+
+      # -----------------------------------------------------------------------
+      # Deploy Release to Active App Directory
+      # -----------------------------------------------------------------------
+      - name: Deploy release to active app directory
+        run: |
+          ssh -p ${{ vars.SSH_PORT || 22 }} -o StrictHostKeyChecking=no ${{ vars.SSH_USERNAME }}@${{ vars.SSH_HOST }} "
+            cd ${{ vars.SSH_REMOTE_DIR }}
+
+            RELEASE_DIR=${{ vars.SSH_REMOTE_DIR }}/releases/${{ env.DEPLOY_TIMESTAMP }}
+            APP_DIR=${{ vars.SSH_APP_DIR }}
+
+            # Ensure app directory exists
+            mkdir -p \$APP_DIR
+
+            # Put app in maintenance mode (skip if first deploy)
+            if [ -f \$APP_DIR/artisan ]; then
+                ${{ vars.PHP_EXECUTABLE || 'php' }} \$APP_DIR/artisan down --retry=15 2>/dev/null || true
+            fi
+
+            # Resolve the absolute path of the server upload directory
+            SERVER_UPLOAD_PATH=\"${{ vars.SSH_UPLOAD_DIR || 'uploads' }}\"
+            if [[ \"\$SERVER_UPLOAD_PATH\" != /* ]]; then
+              SERVER_UPLOAD_PATH=\"${{ vars.SSH_REMOTE_DIR }}/\$SERVER_UPLOAD_PATH\"
+            fi
+            mkdir -p \"\$SERVER_UPLOAD_PATH\"
+
+            # Rsync release into app directory, excluding the uploads directory
+            rsync -a --delete \
+              --exclude='${{ vars.LARAVEL_UPLOAD_DIR || 'public/uploads' }}' \
+              \$RELEASE_DIR/ \$APP_DIR/
+
+            # Ensure the parent directory for uploads exists in app directory
+            mkdir -p \$(dirname \"\$APP_DIR/${{ vars.LARAVEL_UPLOAD_DIR || 'public/uploads' }}\")
+
+            # Create uploads symlink in app directory
+            ln -sfn \"\$SERVER_UPLOAD_PATH\" \"\$APP_DIR/${{ vars.LARAVEL_UPLOAD_DIR || 'public/uploads' }}\"
+
+            # Set write permissions
+            chown -R www-data:www-data \$APP_DIR 2>/dev/null || true
+            chmod -R 755 \$APP_DIR/storage
+            chmod -R 755 \$APP_DIR/bootstrap/cache
+
+            # Clear and cache Laravel config/routes/views in app directory
+            ${{ vars.PHP_EXECUTABLE || 'php' }} \$APP_DIR/artisan config:clear
+            ${{ vars.PHP_EXECUTABLE || 'php' }} \$APP_DIR/artisan config:cache
+            ${{ vars.PHP_EXECUTABLE || 'php' }} \$APP_DIR/artisan route:clear
+            ${{ vars.PHP_EXECUTABLE || 'php' }} \$APP_DIR/artisan route:cache
+            ${{ vars.PHP_EXECUTABLE || 'php' }} \$APP_DIR/artisan view:clear
+            ${{ vars.PHP_EXECUTABLE || 'php' }} \$APP_DIR/artisan view:cache
+
+            # Reset OPcache
+            ${{ vars.PHP_EXECUTABLE || 'php' }} -r \"if(function_exists('opcache_reset')) { opcache_reset(); }\"
+
+            # Bring app back up
+            ${{ vars.PHP_EXECUTABLE || 'php' }} \$APP_DIR/artisan up
+
+            # Keep the 3 most recent releases, prune older ones
+            cd ${{ vars.SSH_REMOTE_DIR }}/releases
+            ls -t | tail -n +4 | xargs rm -rf 2>/dev/null || true
+          "
+
+      # -----------------------------------------------------------------------
+      # Health Check and Automatic Rollback
+      # -----------------------------------------------------------------------
+      - name: Run health check with automatic rollback
+        run: |
+          max_attempts=3
+          attempt=1
+          target_url="${{ vars.APP_URL }}"
+          passed=false
+
+          echo "Initiating health check for $target_url"
+
+          while [ $attempt -le $max_attempts ]; do
+              echo "Health check attempt $attempt/$max_attempts..."
+              
+              # Try hitting the app's health route first, then fall back to the main domain
+              if curl -f -s --max-time 15 "$target_url/health" >/dev/null 2>&1 || curl -f -s --max-time 15 "$target_url" >/dev/null 2>&1; then
+                  echo "✅ Health check passed!"
+                  passed=true
+                  break
+              fi
+
+              attempt=$((attempt + 1))
+              if [ $attempt -le $max_attempts ]; then
+                  echo "Health check failed. Retrying in 10 seconds..."
+                  sleep 10
+              fi
+          done
+
+          if [ "$passed" = false ]; then
+              echo "❌ Health check failed after $max_attempts attempts! Rolling back to previous release..."
+              
+              ssh -p ${{ vars.SSH_PORT || 22 }} -o StrictHostKeyChecking=no ${{ vars.SSH_USERNAME }}@${{ vars.SSH_HOST }} "
+                cd ${{ vars.SSH_REMOTE_DIR }}
+                APP_DIR=${{ vars.SSH_APP_DIR }}
+
+                # Find the previous release (second most recent)
+                PREVIOUS_RELEASE=\$(ls -t releases/ | sed -n '2p')
+
+                if [ ! -z \"\$PREVIOUS_RELEASE\" ]; then
+                    echo \"Rolling back to release: \$PREVIOUS_RELEASE\"
+
+                    # Maintenance mode
+                    ${{ vars.PHP_EXECUTABLE || 'php' }} \$APP_DIR/artisan down --retry=15 2>/dev/null || true
+
+                    # Resolve upload path
+                    SERVER_UPLOAD_PATH=\"${{ vars.SSH_UPLOAD_DIR || 'uploads' }}\"
+                    if [[ \"\$SERVER_UPLOAD_PATH\" != /* ]]; then
+                      SERVER_UPLOAD_PATH=\"${{ vars.SSH_REMOTE_DIR }}/\$SERVER_UPLOAD_PATH\"
+                    fi
+
+                    # Rsync previous release into app directory
+                    rsync -a --delete \
+                      --exclude='${{ vars.LARAVEL_UPLOAD_DIR || 'public/uploads' }}' \
+                      releases/\$PREVIOUS_RELEASE/ \$APP_DIR/
+
+                    # Restore uploads symlink
+                    mkdir -p \$(dirname \"\$APP_DIR/${{ vars.LARAVEL_UPLOAD_DIR || 'public/uploads' }}\")
+                    ln -sfn \"\$SERVER_UPLOAD_PATH\" \"\$APP_DIR/${{ vars.LARAVEL_UPLOAD_DIR || 'public/uploads' }}\"
+
+                    # Fix permissions
+                    chown -R www-data:www-data \$APP_DIR 2>/dev/null || true
+                    chmod -R 755 \$APP_DIR/storage
+                    chmod -R 755 \$APP_DIR/bootstrap/cache
+
+                    # Clear and cache Laravel config/routes/views in app directory
+                    ${{ vars.PHP_EXECUTABLE || 'php' }} \$APP_DIR/artisan config:clear
+                    ${{ vars.PHP_EXECUTABLE || 'php' }} \$APP_DIR/artisan config:cache
+                    ${{ vars.PHP_EXECUTABLE || 'php' }} \$APP_DIR/artisan route:clear
+                    ${{ vars.PHP_EXECUTABLE || 'php' }} \$APP_DIR/artisan route:cache
+                    ${{ vars.PHP_EXECUTABLE || 'php' }} \$APP_DIR/artisan view:clear
+                    ${{ vars.PHP_EXECUTABLE || 'php' }} \$APP_DIR/artisan view:cache
+
+                    # Reset OPcache and bring back up
+                    ${{ vars.PHP_EXECUTABLE || 'php' }} -r \"if(function_exists('opcache_reset')) { opcache_reset(); }\"
+                    ${{ vars.PHP_EXECUTABLE || 'php' }} \$APP_DIR/artisan up
+                else
+                    echo \"Rollback failed: No previous release directory found on server.\"
+                fi
+              "
+              exit 1
+          fi
+
+      # -----------------------------------------------------------------------
+      # Cleanup SSH Keys
+      # -----------------------------------------------------------------------
+      - name: Clean up SSH credentials
+        if: always()
+        run: |
+          rm -f ~/.ssh/id_rsa
