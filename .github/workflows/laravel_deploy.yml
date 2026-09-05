@@ -94,19 +94,12 @@
 name: Laravel + Inertia Deploy
 
 on:
-  push:
-    branches:
-      - development
-  workflow_dispatch:
+  workflow_call:
     inputs:
       environment:
         description: 'Environment to deploy to'
         required: true
-        default: 'Production Apnea Dewata'
-        type: choice
-        options:
-          - Dev Apnea Dewata
-          - Production Apnea Dewata
+        type: string
 
 concurrency:
   group: deploy-${{ github.ref_name }}-${{ inputs.environment || 'Production Apnea Dewata' }}
